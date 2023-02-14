@@ -1,7 +1,9 @@
+import copy
+
 import munkres
 import scipy
 import numpy as np
-from pyoptdmd import optimalDMD
+from pydmd.bopdmd import BOPDMD
 
 
 def match_vectors(vector1, vector2):
@@ -49,14 +51,18 @@ def match_vectors(vector1, vector2):
     return np.array(row_indices), np.array(col_indices)
 
 
-def fit(xdata, ts, modes, num_ensembles=10, ensemble_size=None, verbose=False,
-        seed=None, long_term_mean=None, long_term_ts=None, ensemble_pruning=True):
+def fit(xdata, ts, modes, num_ensembles=10, ensemble_size=None,
+        seed=None, long_term_mean=None, long_term_ts=None, forecast_x=None,
+        t_forecast=None, pydmd_kwargs=None):
     """
 
     Warnings: currently only works on 2D data with a spatial dimension and a time
     dimension. Anything else will require more careful specification of dimensions.
 
     """
+
+    if pydmd_kwargs is None:
+        pydmd_kwargs = {}
 
     spatial_length = xdata.shape[0]
     time_length = ts.size
@@ -66,8 +72,9 @@ def fit(xdata, ts, modes, num_ensembles=10, ensemble_size=None, verbose=False,
 
     # Create the lambda vector for ensembleDMD cycle
     e_ensembleDMD = np.zeros((modes, num_ensembles)).astype(complex)
-    w_ensembleDMD = np.zeros((spatial_length, modes, num_ensembles)).astype(complex)
-    b_ensembleDMD = np.zeros((modes, num_ensembles)).astype(complex)
+    bopdmd_ensemble = []
+    # w_ensembleDMD = np.zeros((spatial_length, modes, num_ensembles)).astype(complex)
+    # b_ensembleDMD = np.zeros((modes, num_ensembles)).astype(complex)
 
     # Substantiate the random generator.
     rng = np.random.default_rng(seed)
@@ -75,24 +82,29 @@ def fit(xdata, ts, modes, num_ensembles=10, ensemble_size=None, verbose=False,
     if ensemble_size is None:
         ensemble_size = ts.size // 2
 
-    # Fit the non-optimal variable projection DMD?
-    # phi_DMD, lam_DMD, b_DMD, sig_DMD = DMD(xdata(:,1:end-1), xdata(:,2:end), 3);
+    optdmd = BOPDMD(svd_rank=modes, num_trials=0, **pydmd_kwargs)
 
     # Try the optdmd without bagging to get an initial guess.
     # Extend the data using an assumption about the long term behavior.
-    if long_term_ts is not None and long_term_mean is not None:
-        xdata_ext = np.append(xdata, long_term_mean, axis=1)
-        ts_ext = np.append(ts, long_term_ts, axis=1)
-        w_opt, e_opt, b_opt, _ = optimalDMD.optdmd(xdata_ext, ts_ext, modes, 1)
-    else:
-        w_opt, e_opt, b_opt, _ = optimalDMD.optdmd(xdata, ts, modes, 1)
+    # if long_term_ts is not None and long_term_mean is not None:
+    #     xdata_ext = np.append(xdata, long_term_mean, axis=1)
+    #     ts_ext = np.append(ts, long_term_ts, axis=1)
+    #     optdmd.fit(xdata_ext, ts_ext)
+    #     e_opt = optdmd.eigs
+    # else:
+    optdmd.fit(xdata, ts)
+    e_opt = optdmd.eigs
 
-    linear_algebra_error_counter = 0
     j = 0
 
     while j < num_ensembles:
+        bopdmd = BOPDMD(
+            svd_rank=modes, num_trials=0, init_alpha=optdmd.eigs, **pydmd_kwargs)
+
         # Randomly select time indices for this ensemble member.
-        ind = rng.integers(low=0, high=ts.size - 1, size=ensemble_size)
+        # ind = rng.integers(low=0, high=ts.size - 1, size=ensemble_size)
+        # Random selection without replacement.
+        ind = rng.choice(ts.size, size=ensemble_size, replace=False)
 
         # Sort the index to be in ascending order, generating variable length time steps.
         ind = np.sort(ind)
@@ -101,55 +113,34 @@ def fit(xdata, ts, modes, num_ensembles=10, ensemble_size=None, verbose=False,
         xdata_cycle = xdata[:, ind]
         ts_ind = ts[:, ind]
 
-        # Extend the data using an assumption about the long term behavior.
-        if long_term_ts is not None and long_term_mean is not None:
-            xdata_cycle = np.append(xdata_cycle, long_term_mean, axis=1)
-            ts_ind = np.append(ts_ind, long_term_ts, axis=1)
-
-        # For very high levels of noise the linear least squares svd solver
-        # can fail. Catch those and pass on to the next ensemble member.
+        # Solve optdmd for this ensemble member.
+        # Potential change: Use optDMD modes as initial conditions for BOP-DMD instead
+        # of trapezoidal solution?
         try:
-            # Solve optdmd for this ensemble member. Use optDMD modes as initial
-            # conditions for BOP-DMD
-            w_cycle, e_cycle, b_cycle, exit_mode = optimalDMD.optdmd(
-                xdata_cycle, ts_ind, modes, 0, alpha_init=e_opt, verbose=verbose
-            )
+            # Extend the data using an assumption about the long term behavior.
+            if long_term_ts is not None and long_term_mean is not None:
+                xdata_cycle = np.append(xdata_cycle, long_term_mean, axis=1)
+                ts_ind = np.append(ts_ind, long_term_ts, axis=1)
 
-            # Match the eigenvalues to those from first optdmd call using the Munkres
-            # algorithm. This step ensures that the eigenvalues have about the right
-            # ordering.
-            _, indices = match_vectors(e_cycle, e_opt)
-
-            if exit_mode.lambda_solver == 'predicted' and exit_mode.exit_state == \
-                    'maxiter' and ensemble_pruning:
-                # continue
-                # e_ensembleDMD[:, j] = np.ones_like(e_cycle[indices].flatten()) * np.nan
-                # w_ensembleDMD[:, :, j] = np.ones_like(w_cycle[:, indices]) * np.nan
-                # b_ensembleDMD[:, j] = np.ones_like(b_cycle[indices].flatten()) * np.nan
-                e_ensembleDMD[:, j] = np.complex(np.nan)
-                w_ensembleDMD[:, :, j] = np.complex(np.nan)
-                b_ensembleDMD[:, j] = np.complex(np.nan)
-            else:
-                # Assign to the outer container using the correct ordering.
-                e_ensembleDMD[:, j] = e_cycle[indices].flatten()
-                w_ensembleDMD[:, :, j] = w_cycle[:, indices]
-                b_ensembleDMD[:, j] = b_cycle[indices].flatten()
-            j += 1
-
+            bopdmd.fit(xdata_cycle, ts_ind)
         except np.linalg.LinAlgError:
-            linear_algebra_error_counter += 1
+            # Some draws with the long term prior will create an error. Continue drawing
+            # until the fit stops failing.
+            continue
 
-        if linear_algebra_error_counter > num_ensembles:
-            raise ValueError('Excessive failures in BOP-DMD solutions.')
+        e_bop = bopdmd.eigs
+        bopdmd_ensemble.append(copy.copy(bopdmd))
 
-    return e_ensembleDMD, w_ensembleDMD, b_ensembleDMD
+        # Match the eigenvalues to those from first optdmd call using the Munkres
+        # algorithm. This step ensures that the eigenvalues have about the right
+        # ordering.
+        _, indices = match_vectors(e_bop, e_opt)
 
+        # Assign to the outer container using the correct ordering.
+        e_ensembleDMD[:, j] = e_bop[indices].flatten()
+        j += 1
 
-def predict(e, w, b, ts):
-    # Reconstruct the data for the requested times.
-    x_predict = np.dot(np.dot(w, np.diag(b)), np.exp(np.dot(e[:, np.newaxis], ts)))
-
-    return x_predict
+    return e_ensembleDMD, bopdmd_ensemble, e_opt, optdmd
 
 
 if __name__ == "__main__":
@@ -193,5 +184,5 @@ if __name__ == "__main__":
     # Create data for noise cycle (add random noise)
     xdata = xclean + sigma * rng.standard_normal(xclean.shape)
 
-    e, w, b = fit(xdata, ts, 3, num_ensembles=10, ensemble_size=50, verbose=False,
-                  seed=None)
+    # e, w, b = fit(xdata, ts, 3, num_ensembles=10, ensemble_size=50, verbose=False,
+    #               seed=None)
