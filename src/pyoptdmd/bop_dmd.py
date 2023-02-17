@@ -85,13 +85,6 @@ def fit(xdata, ts, modes, num_ensembles=10, ensemble_size=None,
     optdmd = BOPDMD(svd_rank=modes, num_trials=0, **pydmd_kwargs)
 
     # Try the optdmd without bagging to get an initial guess.
-    # Extend the data using an assumption about the long term behavior.
-    # if long_term_ts is not None and long_term_mean is not None:
-    #     xdata_ext = np.append(xdata, long_term_mean, axis=1)
-    #     ts_ext = np.append(ts, long_term_ts, axis=1)
-    #     optdmd.fit(xdata_ext, ts_ext)
-    #     e_opt = optdmd.eigs
-    # else:
     optdmd.fit(xdata, ts)
     e_opt = optdmd.eigs
 
